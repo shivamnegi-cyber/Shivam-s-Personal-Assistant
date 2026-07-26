@@ -136,19 +136,43 @@ def tg(method, **payload):
     r = requests.post(f"{TG_API}/{method}", json=payload, timeout=30)
     return r.json()
 
+def _md_to_tg(t):
+    """Clean model output into Telegram-safe HTML: drop code fences, convert markdown."""
+    if not t:
+        return t
+    t = re.sub(r"```[a-zA-Z]*\n?", "", t).replace("```", "")   # code fences
+    t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=re.DOTALL)  # **bold**
+    t = re.sub(r"__(.+?)__", r"<b>\1</b>", t, flags=re.DOTALL)      # __bold__
+    t = re.sub(r"(?m)^#{1,6}\s*(.+)$", r"<b>\1</b>", t)             # ## headers
+    t = re.sub(r"(?m)^\s*[\*\-]\s+", "• ", t)                       # - / * bullets
+    return t.strip()
+
+def _plain(t):
+    return re.sub(r"<[^>]+>", "", t or "")
+
 def send(text, buttons=None, chat=None):
+    text = _md_to_tg(text)
     payload = {"chat_id": chat or TG_CHAT, "text": text,
                "parse_mode": "HTML", "disable_web_page_preview": True}
     if buttons:
         payload["reply_markup"] = {"inline_keyboard": buttons}
-    return tg("sendMessage", **payload)
+    r = tg("sendMessage", **payload)
+    if not r.get("ok"):                       # bad HTML -> resend as plain text
+        payload["text"] = _plain(text); payload.pop("parse_mode", None)
+        r = tg("sendMessage", **payload)
+    return r
 
 def edit(chat, message_id, text, buttons=None):
+    text = _md_to_tg(text)
     payload = {"chat_id": chat, "message_id": message_id, "text": text,
                "parse_mode": "HTML", "disable_web_page_preview": True}
     if buttons:
         payload["reply_markup"] = {"inline_keyboard": buttons}
-    return tg("editMessageText", **payload)
+    r = tg("editMessageText", **payload)
+    if not r.get("ok"):
+        payload["text"] = _plain(text); payload.pop("parse_mode", None)
+        r = tg("editMessageText", **payload)
+    return r
 
 def answer_cb(cb_id, text=""):
     return tg("answerCallbackQuery", callback_query_id=cb_id, text=text)
