@@ -451,18 +451,91 @@ def mark_done(task_id):
     log_event("task_done", task or task_id)
     return task
 
+# ----------------------------------------------------------------------------- NATURAL LANGUAGE BRAIN
+# Turns plain messages into the right action — no command syntax, no Task IDs needed.
+def understand(text):
+    tasks = open_tasks()
+    tlist = "\n".join(
+        f"{r.get('Task ID')}: {r.get('Task')} [{r.get('Priority')}] due {r.get('Due Date')}"
+        for r in tasks) or "(no open tasks)"
+    today = now_ist().strftime("%Y-%m-%d (%A)")
+    sysp = (
+        "You are Shivam's PA. Convert his message into ONE JSON action. Intents:\n"
+        '  {"intent":"add_task","task":"...","priority":"P1|P2|P3","due":"YYYY-MM-DD or empty"}\n'
+        '  {"intent":"complete_task","task_id":"<exact id from OPEN TASKS he means, or empty>"}\n'
+        '  {"intent":"list_tasks"}\n'
+        '  {"intent":"reflect"}   {"intent":"report"}\n'
+        '  {"intent":"ask","query":"..."}   (questions, research, anything needing thought)\n'
+        '  {"intent":"chat","reply":"short friendly reply"}   (small talk / acknowledgements)\n'
+        "Rules: if he says he finished/closed/did something, match it to the OPEN TASK he means "
+        "and use complete_task with that Task ID. If he describes a new to-do, use add_task and "
+        "infer priority + resolve relative dates (today/tomorrow/Friday) to YYYY-MM-DD. "
+        "Default priority P2. Return ONLY the JSON, nothing else."
+    )
+    out, _ = ai(system=sysp,
+                prompt=f"Today is {today}.\nOPEN TASKS:\n{tlist}\n\nMessage: {text}",
+                purpose="quick")
+    try:
+        return json.loads(re.search(r"\{.*\}", out, re.DOTALL).group())
+    except Exception:
+        return {"intent": "ask", "query": text}
+
+def fuzzy_complete(text):
+    """Fallback if the model didn't return an id: match by shared words."""
+    words = set(re.findall(r"[a-z0-9]+", text.lower()))
+    best, score = None, 0
+    for r in open_tasks():
+        tw = set(re.findall(r"[a-z0-9]+", str(r.get("Task", "")).lower()))
+        s = len(words & tw)
+        if s > score:
+            score, best = s, r
+    return mark_done(best.get("Task ID")) if best and score >= 1 else None
+
+def route_natural(text):
+    a = understand(text)
+    it = a.get("intent", "ask")
+    if it == "add_task":
+        task = (a.get("task") or "").strip()
+        if not task:
+            return send("What would you like me to add?")
+        prio = (a.get("priority") or "P2").upper()
+        due = a.get("due") or ""
+        tid = f"T{int(time.time())%100000}"
+        ws("PA_Tasks").append_row([tid, task, "Telegram", prio, due, "Open", "",
+                                   now_ist().strftime("%Y-%m-%d"), "", ""])
+        log_event("task_added", task)
+        send(f"➕ Got it — added <b>{html.escape(task)}</b> [{prio}]"
+             + (f" · due {due}" if due else "") + ".",
+             buttons=[[btn("✅ Mark done", "done:" + tid), btn("📋 Today", "cmd:today")]])
+    elif it == "complete_task":
+        t = mark_done(a.get("task_id", "")) if a.get("task_id") else None
+        if not t:
+            t = fuzzy_complete(text)
+        send(f"✅ Nice — marked <b>{html.escape(t)}</b> done." if t
+             else "I couldn't tell which task you meant. Which one? (say a few words from it, or /today to see the list)")
+    elif it == "list_tasks":
+        job_morning()
+    elif it == "reflect":
+        job_reflection()
+    elif it == "report":
+        job_report()
+    elif it == "chat":
+        send(a.get("reply") or "👍")
+    else:  # ask / research / anything needing depth
+        send("🔎 <i>Thinking…</i>")
+        send(run_agent(a.get("query") or text))
+
 def handle_command(text, msg):
     cmd = text.split()[0].lower().lstrip("/")
     arg = text[len(cmd)+1:].strip() if " " in text else ""
     if cmd in ("start", "help"):
-        send("🤖 <b>I'm your work PA.</b> Commands:\n"
-             "/today – your ranked Top-5\n"
-             "/add &lt;task&gt; [P1|P2|P3] [YYYY-MM-DD] – add a task\n"
-             "/done &lt;Task ID&gt; – complete a task\n"
-             "/reflect – nightly check-in now\n"
-             "/report – draft the Director report\n"
-             "/ask &lt;question&gt; – I think + research it for you\n"
-             "/research &lt;topic&gt; – deep web research")
+        send("🤖 <b>I'm your work PA — just talk to me naturally.</b>\n"
+             "Say things like:\n"
+             "• <i>“closed the Jaipur audit point”</i> → I mark it done\n"
+             "• <i>“remind me to call the GM Friday”</i> → I add it with the date\n"
+             "• <i>“what's on my plate?”</i> → your ranked Top-5\n"
+             "• <i>“how should I audit housekeeping?”</i> → I think + research it\n\n"
+             "Shortcuts if you prefer: /today · /add · /done · /reflect · /report · /ask · /research")
     elif cmd == "today":
         job_morning()
     elif cmd == "add":
@@ -486,8 +559,7 @@ def handle_command(text, msg):
             send("🔎 <i>Thinking &amp; researching…</i>")
             send(run_agent(arg) if cmd == "ask" else research(arg))
     else:
-        send("🔎 <i>Thinking…</i>")
-        send(run_agent(text))
+        route_natural(text)
 
 def handle_callback(cb):
     data = cb.get("data", "")
@@ -546,7 +618,7 @@ def job_listen(minutes=300):
                     elif config().get("STATE_awaiting_reflection") == "1":
                         job_collect()
                     else:
-                        send("🔎 <i>Thinking…</i>"); send(run_agent(txt))
+                        route_natural(txt)
                 elif "callback_query" in u:
                     handle_callback(u["callback_query"])
             except Exception as e:
