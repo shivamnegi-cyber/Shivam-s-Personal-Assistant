@@ -1,4 +1,4 @@
-# Shivam's AI Personal Assistant
+# AI Personal Assistant
 
 A free, always-on **work PA** for Shivam Negi (Internal Auditor & Trainer, Moustache).
 Reasons, reminds, reflects, reports — and researches the web on command.
