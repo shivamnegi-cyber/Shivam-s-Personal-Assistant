@@ -36,7 +36,7 @@ OAI = {
     "openrouter": ("https://openrouter.ai/api/v1/chat/completions",          "OPENROUTER_API_KEY"),
     "sambanova":  ("https://api.sambanova.ai/v1/chat/completions",           "SAMBANOVA_API_KEY"),
     "mistral":    ("https://api.mistral.ai/v1/chat/completions",             "MISTRAL_API_KEY"),
-    "github":     ("https://models.inference.ai.azure.com/chat/completions", "GITHUB_MODELS_KEY"),
+    "github":     ("https://models.inference.ai.azure.com/chat/completions", "GH_MODELS_KEY"),
     "nvidia":     ("https://integrate.api.nvidia.com/v1/chat/completions",   "NVIDIA_API_KEY"),
     "together":   ("https://api.together.xyz/v1/chat/completions",           "TOGETHER_API_KEY"),
 }
