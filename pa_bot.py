@@ -403,21 +403,177 @@ def job_daily():
     send(_summary("end-of-day", "Today's log:\n" + _log_rows(1)))
 
 def job_weekly():
-    send("📆 <b>Weekly review</b>\n\n" + _summary("weekly", "This week's log:\n" + _log_rows(7)))
+    send("📆 <b>Weekly report</b> — here's your draft for review 👇")
+    job_report("weekly")
 
 def job_monthly():
     send("🗓️ <b>Monthly rollup</b>\n\n" + _summary("monthly", "This month's log:\n" + _log_rows(31)))
 
-def job_report():
-    """Draft the Director report; you review with buttons before sending."""
+# ---------- KRA scorecard (reads your PA_KRA tab in its monthly "<Month> KRA / <Month> Score" layout)
+MONTHS = ["January","February","March","April","May","June",
+          "July","August","September","October","November","December"]
+
+def kra_rows():
+    try:
+        return ws("PA_KRA").get_all_records()
+    except Exception:
+        return []
+
+def kra_current(rows=None):
+    rows = rows if rows is not None else kra_rows()
+    mon = now_ist().strftime("%B")
+    ck, cs = f"{mon} KRA", f"{mon} Score"
+    items = [(str(r.get(ck, "")).strip(), str(r.get(cs, "")).strip())
+             for r in rows if str(r.get(ck, "")).strip()]
+    return mon, items
+
+def kra_scorecard(rows=None):
+    rows = rows if rows is not None else kra_rows()
+    out = []
+    for m in MONTHS:
+        got = tot = 0
+        for r in rows:
+            if str(r.get(f"{m} KRA", "")).strip():
+                tot += 1
+                try:
+                    if int(float(r.get(f"{m} Score", 0) or 0)) >= 1:
+                        got += 1
+                except Exception:
+                    pass
+        if tot:
+            out.append((m, got, tot))
+    return out
+
+def _report_context(kind):
+    days = 7 if kind == "weekly" else 31
+    log = _log_rows(days)
+    tasks = rank_tasks(open_tasks())
+    open_list = "\n".join(
+        f"- [{t.get('Priority')}] {t.get('Task')} (due {t.get('Due Date')}, {t.get('Status')})"
+        for t in tasks[:30]) or "None open."
+    mon, kras = kra_current()
+    kra_txt = "\n".join(f"- {k}  [score: {s or 'pending'}]" for k, s in kras) \
+              or "No KRAs found for this month in the PA_KRA tab."
+    ytd = kra_scorecard()
+    ytd_txt = " · ".join(f"{m}: {g}/{t}" for m, g, t in ytd) or "n/a"
+    return log, open_list, kra_txt, ytd_txt, mon
+
+REP_BTNS = [[btn("✅ Approve & Send", "rep:send"), btn("🔄 Regenerate", "rep:regen")],
+            [btn("❌ Cancel", "rep:cancel")]]
+
+def job_report(kind="monthly"):
+    """Generate an interactive report draft: review & revise in chat, then auto-email on approval."""
     c = config()
-    body = _summary("monthly Director",
-        f"Owner: {c.get('OWNER_NAME')} ({c.get('OWNER_ROLE')}). Director: {c.get('DIRECTOR_NAME','(set in PA_Config)')}.\n"
-        "Write a professional monthly report for the Director covering audit progress, "
-        "trainings delivered, key outcomes, and next month's plan.\nData:\n" + _log_rows(31))
-    send("🧾 <b>Director report — DRAFT (not sent)</b>\n\n" + body,
-         buttons=[[btn("👍 Approve", "rep:approve"), btn("✏️ Edit", "rep:edit"),
-                   btn("🔄 Regenerate", "rep:regen")]])
+    log, open_list, kra_txt, ytd_txt, mon = _report_context(kind)
+    period = (f"Week ending {now_ist().strftime('%d %b %Y')}" if kind == "weekly"
+              else f"{mon} {now_ist().year}")
+    sysp = (f"You are Shivam Negi's chief-of-staff writing a {kind} progress report for his Director, "
+            f"{c.get('DIRECTOR_NAME', 'the Director')}. Shivam is Internal Auditor & Trainer at "
+            "Moustache (India Hostels). EXECUTIVE STYLE — keep it short and skimmable, NOT a long report. "
+            "Start with a 2–3 line <b>Executive Summary</b>. Then concise one-line bullets (use •) under: "
+            "<b>KRA progress</b> (each KRA + its score), <b>Key completions</b>, <b>In-progress / Blocked</b>, "
+            "<b>Next period</b>. No paragraphs, no filler — each bullet ≤ 15 words. Telegram HTML only.")
+    prompt = (f"Period: {period}\nYear-to-date KRA scores: {ytd_txt}\n\n"
+              f"This month's KRAs:\n{kra_txt}\n\nOpen tasks:\n{open_list}\n\nActivity log:\n{log}")
+    draft, _ = ai(system=sysp, prompt=prompt, purpose="long")
+    if not draft:
+        draft = (f"<b>{kind.title()} report — {period}</b>\n\n<b>KRAs</b>\n{kra_txt}\n\n"
+                 f"<b>Activity</b>\n{_plain(log)[:1500]}")
+    set_config("STATE_report_mode", kind)
+    set_config("STATE_report_period", period)
+    set_config("STATE_report_draft", draft)
+    send(f"🧾 <b>{kind.title()} report — DRAFT (not sent yet)</b>\n\n{draft}\n\n"
+         "— Reply with any changes in plain words (e.g. <i>“mark risk assessment done”</i>, "
+         "<i>“remove the laundry line and add I closed the Udaipur audit”</i>), or use the buttons.",
+         buttons=REP_BTNS)
+
+def revise_report(instruction):
+    c = config()
+    draft = c.get("STATE_report_draft", "")
+    new, _ = ai(system=("Revise Shivam's report exactly per his instruction. Keep it professional and "
+                        "in Telegram HTML. Return the FULL revised report only, no preamble."),
+                prompt=f"Current report:\n{draft}\n\nInstruction: {instruction}", purpose="long")
+    new = new or draft
+    set_config("STATE_report_draft", new)
+    send(f"✏️ <b>Updated draft</b>\n\n{new}\n\nMore changes? Or approve to send.", buttons=REP_BTNS)
+
+def _clear_report_state():
+    for k in ("STATE_report_mode", "STATE_report_period", "STATE_report_draft"):
+        set_config(k, "")
+
+def _lat1(s):
+    """Make text safe for fpdf's core (latin-1) font."""
+    for a, b in {"—": "-", "–": "-", "•": "-", "’": "'", "‘": "'", "“": '"', "”": '"',
+                 "…": "...", "₹": "Rs.", "→": "->", "·": "-"}.items():
+        s = s.replace(a, b)
+    return s.encode("latin-1", "ignore").decode("latin-1")
+
+def build_pdf(title, html_text):
+    from fpdf import FPDF
+    text = _lat1(_plain(html_text))
+    pdf = FPDF(); pdf.add_page(); pdf.set_margins(15, 15, 15)
+    def cell(txt, size, bold=False, h=6):
+        pdf.set_font("Helvetica", "B" if bold else "", size)
+        pdf.multi_cell(0, h, txt if txt.strip() else " ", new_x="LMARGIN", new_y="NEXT")
+    cell(_lat1("Moustache — India Hostels Pvt Ltd"), 15, True, 9)
+    cell(_lat1(title), 12, True, 8)
+    pdf.ln(2)
+    for line in text.split("\n"):
+        cell(line, 11, False, 6)
+    path = f"/tmp/report_{int(time.time())}.pdf"; pdf.output(path); return path
+
+def email_report(subject, html_body, pdf_path, to_list, cc=None):
+    user, pw = os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", "")
+    if not (user and pw):
+        return False, "SMTP_USER / SMTP_PASS secrets not set"
+    if not to_list:
+        return False, "No recipient — set DIRECTOR_EMAIL in PA_Config"
+    import smtplib
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["Subject"] = subject; msg["From"] = user; msg["To"] = ", ".join(to_list)
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    msg.set_content(_plain(html_body))
+    msg.add_alternative(f"<html><body>{html_body}</body></html>", subtype="html")
+    try:
+        with open(pdf_path, "rb") as f:
+            msg.add_attachment(f.read(), maintype="application", subtype="pdf",
+                               filename=pdf_path.rsplit("/", 1)[-1])
+    except Exception:
+        pass
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+            s.starttls(); s.login(user, pw); s.send_message(msg)
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+def send_report():
+    c = config()
+    draft = c.get("STATE_report_draft", "")
+    kind = c.get("STATE_report_mode", "monthly") or "monthly"
+    period = c.get("STATE_report_period", "")
+    if not draft:
+        return send("There's no report draft to send. Say “generate report” to start one.")
+    director = c.get("DIRECTOR_EMAIL", "").strip()
+    me = os.environ.get("SMTP_USER", "").strip()
+    to_list = [director] if director else []
+    subject = f"{kind.title()} Report — {c.get('OWNER_NAME','Shivam Negi')} — {period}"
+    pdf = build_pdf(subject, draft)
+    ok, err = email_report(subject, draft, pdf, to_list, cc=[me] if me else None)
+    try:
+        ws("PA_Reports").append_row([f"R{int(time.time())%100000}", kind.title(), period,
+            now_ist().strftime("%Y-%m-%d"), "Sent" if ok else "Failed", _plain(draft)[:400], ""])
+    except Exception:
+        pass
+    if ok:
+        _clear_report_state()
+        send(f"📤 Sent the {kind} report to <b>{director or 'nobody set'}</b> "
+             f"(copy to you). Archived in PA_Reports. ✅")
+    else:
+        send(f"⚠️ Couldn't email it: <code>{html.escape(err)}</code>\nDraft kept — fix and try again. "
+             "(Check SMTP_USER/SMTP_PASS secrets and DIRECTOR_EMAIL in PA_Config.)")
 
 # ----------------------------------------------------------------------------- COMMAND + BUTTON HANDLERS
 def add_task(text):
@@ -582,13 +738,14 @@ def handle_callback(cb):
     elif data.startswith("rep:"):
         act = data.split(":", 1)[1]
         answer_cb(cb["id"], act)
-        if act == "approve":
-            send("👍 Approved. Forward the report above to your Director whenever you're ready. "
-                 "(Auto-send to his inbox can be switched on later.)")
+        if act == "send":
+            send_report()
         elif act == "regen":
-            job_report()
+            job_report(config().get("STATE_report_mode", "monthly") or "monthly")
+        elif act == "cancel":
+            _clear_report_state(); send("❌ Report cancelled — nothing sent.")
         else:
-            send("✏️ Tell me what to change and I'll redraft.")
+            send("✏️ Tell me the changes and I'll revise the draft.")
     else:
         answer_cb(cb["id"])
 
@@ -615,10 +772,20 @@ def job_listen(minutes=300):
                     txt = m["text"]
                     if txt.startswith("/"):
                         handle_command(txt, m)
-                    elif config().get("STATE_awaiting_reflection") == "1":
-                        job_collect()
                     else:
-                        route_natural(txt)
+                        st = config()
+                        if st.get("STATE_awaiting_reflection") == "1":
+                            job_collect()
+                        elif st.get("STATE_report_mode"):
+                            low = txt.strip().lower()
+                            if low in ("send", "send it", "approve", "approve & send", "ok send", "yes send"):
+                                send_report()
+                            elif low in ("cancel", "stop", "discard", "no"):
+                                _clear_report_state(); send("❌ Report cancelled — nothing sent.")
+                            else:
+                                revise_report(txt)
+                        else:
+                            route_natural(txt)
                 elif "callback_query" in u:
                     handle_callback(u["callback_query"])
             except Exception as e:
