@@ -53,7 +53,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
           MISTRAL_API_KEY:   ${{ secrets.MISTRAL_API_KEY }}
-          GITHUB_MODELS_KEY: ${{ secrets.GITHUB_MODELS_KEY }}
+          GITHUB_MODELS_KEY: ${{ secrets.GH_MODELS_KEY }}
           NVIDIA_API_KEY:    ${{ secrets.NVIDIA_API_KEY }}
           TOGETHER_API_KEY:  ${{ secrets.TOGETHER_API_KEY }}
         run: python pa_bot.py ${{ steps.pick.outputs.job }}
@@ -71,7 +71,7 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
           MISTRAL_API_KEY:   ${{ secrets.MISTRAL_API_KEY }}
-          GITHUB_MODELS_KEY: ${{ secrets.GITHUB_MODELS_KEY }}
+          GITHUB_MODELS_KEY: ${{ secrets.GH_MODELS_KEY }}
           NVIDIA_API_KEY:    ${{ secrets.NVIDIA_API_KEY }}
           TOGETHER_API_KEY:  ${{ secrets.TOGETHER_API_KEY }}
         run: python pa_bot.py report
