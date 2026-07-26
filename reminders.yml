@@ -1,0 +1,77 @@
+name: PA Reminders
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run now (for testing)"
+        required: true
+        default: ping
+        type: choice
+        options: [ping, morning, reflection, collect, daily, weekly, monthly, report]
+  schedule:
+    - cron: "30 1 * * *"    # 07:00 IST  -> morning Top-5
+    - cron: "30 15 * * *"   # 21:00 IST  -> nightly reflection
+    - cron: "45 15 * * *"   # 21:15 IST  -> daily digest
+    - cron: "0 16 * * *"    # 21:30 IST  -> collect reflection reply
+    - cron: "30 12 * * 5"   # Fri 18:00 IST -> weekly review
+    - cron: "30 12 1 * *"   # 1st 18:00 IST -> monthly rollup + Director report draft
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Decide which job
+        id: pick
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "job=${{ github.event.inputs.job }}" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "${{ github.event.schedule }}" in
+            "30 1 * * *")  echo "job=morning"    >> "$GITHUB_OUTPUT";;
+            "30 15 * * *") echo "job=reflection" >> "$GITHUB_OUTPUT";;
+            "45 15 * * *") echo "job=daily"      >> "$GITHUB_OUTPUT";;
+            "0 16 * * *")  echo "job=collect"    >> "$GITHUB_OUTPUT";;
+            "30 12 * * 5") echo "job=weekly"     >> "$GITHUB_OUTPUT";;
+            "30 12 1 * *") echo "job=monthly"    >> "$GITHUB_OUTPUT";;
+            *)             echo "job=ping"       >> "$GITHUB_OUTPUT";;
+          esac
+      - name: Run PA job
+        env:
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHEET_ID:          ${{ secrets.SHEET_ID }}
+          GOOGLE_SA_JSON:    ${{ secrets.GOOGLE_SA_JSON }}
+          GROQ_API_KEY:      ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          CEREBRAS_API_KEY:  ${{ secrets.CEREBRAS_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
+          MISTRAL_API_KEY:   ${{ secrets.MISTRAL_API_KEY }}
+          GITHUB_MODELS_KEY: ${{ secrets.GITHUB_MODELS_KEY }}
+          NVIDIA_API_KEY:    ${{ secrets.NVIDIA_API_KEY }}
+          TOGETHER_API_KEY:  ${{ secrets.TOGETHER_API_KEY }}
+        run: python pa_bot.py ${{ steps.pick.outputs.job }}
+      # Also run the monthly Director report right after the monthly rollup
+      - name: Monthly Director report
+        if: steps.pick.outputs.job == 'monthly'
+        env:
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHEET_ID:          ${{ secrets.SHEET_ID }}
+          GOOGLE_SA_JSON:    ${{ secrets.GOOGLE_SA_JSON }}
+          GROQ_API_KEY:      ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          CEREBRAS_API_KEY:  ${{ secrets.CEREBRAS_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
+          MISTRAL_API_KEY:   ${{ secrets.MISTRAL_API_KEY }}
+          GITHUB_MODELS_KEY: ${{ secrets.GITHUB_MODELS_KEY }}
+          NVIDIA_API_KEY:    ${{ secrets.NVIDIA_API_KEY }}
+          TOGETHER_API_KEY:  ${{ secrets.TOGETHER_API_KEY }}
+        run: python pa_bot.py report
