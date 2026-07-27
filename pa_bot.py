@@ -436,7 +436,9 @@ STYLE = ("Voice: reply like a sharp, professional human assistant texting Shivam
          "Natural and concise. NEVER add meta-text ('Here's your...', 'in Telegram HTML format', "
          "'as an AI'). NEVER announce formatting. Avoid rigid headers like 'Priority 1 (P1):'. "
          "Just say it plainly — a short line or a couple of simple bullets, only when they help. "
-         "You may use <b>bold</b> sparingly for a key word.")
+         "You may use <b>bold</b> sparingly for a key word. "
+         "LANGUAGE: reply in the SAME language and script Shivam used — English if English, "
+         "Hindi (Devanagari) if he wrote/spoke Hindi, or Hinglish if he mixed. Mirror him naturally.")
 
 def agent_run(name, text, depth=0):
     a = AGENTS[name]
@@ -891,27 +893,25 @@ def transcribe(data):
         r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {key}"},
             files={"file": ("audio.ogg", data, "audio/ogg")},
-            data={"model": "whisper-large-v3", "language": "en"}, timeout=120)
+            data={"model": "whisper-large-v3"}, timeout=120)   # auto-detect language (Hindi/English/mixed)
         r.raise_for_status()
         return r.json().get("text", "").strip()
     except Exception:
         return ""
 
+VISION_MODELS = [
+    ("groq",       "meta-llama/llama-4-scout-17b-16e-instruct"),
+    ("groq",       "meta-llama/llama-4-maverick-17b-128e-instruct"),
+    ("openrouter", "google/gemini-2.0-flash-exp:free"),
+    ("openrouter", "qwen/qwen2.5-vl-72b-instruct:free"),
+    ("openrouter", "meta-llama/llama-3.2-11b-vision-instruct:free"),
+]
+
 def vision(data, prompt):
-    """Image -> text. Gemini vision first, then free Llama-vision fallbacks."""
+    """Image -> text. Walks free vision models; returns (text, error_summary)."""
     b64 = base64.b64encode(data).decode()
-    if _k("GEMINI_API_KEY"):
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={_k('GEMINI_API_KEY')}"
-            r = requests.post(url, timeout=120, json={"contents": [{"parts": [
-                {"text": prompt},
-                {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]})
-            if r.status_code == 200:
-                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except Exception:
-            pass
-    for prov, model in [("openrouter", "meta-llama/llama-3.2-11b-vision-instruct:free"),
-                        ("groq", "meta-llama/llama-4-scout-17b-16e-instruct")]:
+    errors = []
+    for prov, model in VISION_MODELS:
         if prov not in OAI or not _k(OAI[prov][1]):
             continue
         try:
@@ -921,10 +921,25 @@ def vision(data, prompt):
                     {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]})
             if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"].strip()
-        except Exception:
-            continue
-    return ""
+                out = r.json()["choices"][0]["message"]["content"].strip()
+                if out:
+                    return out, ""
+            else:
+                errors.append(f"{prov}/{model.split('/')[-1][:22]}: {r.status_code} {r.text[:90]}")
+        except Exception as e:
+            errors.append(f"{prov}: {type(e).__name__}")
+    # Gemini direct (its key format may be non-standard, so it's last)
+    if _k("GEMINI_API_KEY"):
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={_k('GEMINI_API_KEY')}"
+            r = requests.post(url, timeout=120, json={"contents": [{"parts": [
+                {"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]})
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip(), ""
+            errors.append(f"gemini: {r.status_code} {r.text[:90]}")
+        except Exception as e:
+            errors.append(f"gemini: {type(e).__name__}")
+    return "", " | ".join(errors[:4])
 
 def handle_voice(file_id):
     tg("sendChatAction", chat_id=TG_CHAT, action="typing")
@@ -949,9 +964,9 @@ def handle_photo(file_id, caption=""):
               "Extract the useful content concisely. If it's a checklist, audit sheet, whiteboard or notes, "
               "list the items as short bullets. If it has action items, flag them clearly. "
               + (f"His caption: {caption}. " if caption else ""))
-    out = vision(data, prompt)
+    out, err = vision(data, prompt)
     if not out:
-        return send("Couldn't read that image — try a clearer, well-lit photo.")
+        return send("Couldn't read that image.\n<i>" + html.escape(err or "no vision model available") + "</i>")
     send(out + "\n\n<i>Want me to add any of these as tasks? Just say which.</i>")
 
 def _dispatch_text(txt):
