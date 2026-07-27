@@ -8,14 +8,18 @@ on:
         required: true
         default: ping
         type: choice
-        options: [ping, morning, reflection, collect, daily, weekly, monthly, report]
+        options: [ping, morning, reflection, collect, daily, weekly, monthly, report,
+                  evening, watchdog, halfyearly, yearly, appraisal]
   schedule:
-    - cron: "30 1 * * *"    # 07:00 IST  -> morning Top-5
+    - cron: "30 1 * * *"    # 07:00 IST  -> morning brief (tasks + meetings + heads-up)
+    - cron: "30 12 * * *"   # 18:00 IST  -> evening watchdog (overdue / at-risk / follow-ups)
     - cron: "30 15 * * *"   # 21:00 IST  -> nightly reflection
     - cron: "45 15 * * *"   # 21:15 IST  -> daily digest
     - cron: "0 16 * * *"    # 21:30 IST  -> collect reflection reply
-    - cron: "30 12 * * 5"   # Fri 18:00 IST -> weekly review
-    - cron: "30 12 1 * *"   # 1st 18:00 IST -> monthly rollup + Director report draft
+    - cron: "30 12 * * 5"   # Fri 18:00 IST -> weekly report draft
+    - cron: "30 12 1 * *"   # 1st 18:00 IST -> monthly rollup
+    - cron: "30 12 1 1,7 *" # 1 Jan & 1 Jul 18:00 IST -> half-yearly report draft
+    - cron: "0 13 1 1 *"    # 1 Jan 18:30 IST -> yearly report + self-appraisal
 
 jobs:
   run:
@@ -34,13 +38,16 @@ jobs:
             echo "job=${{ github.event.inputs.job }}" >> "$GITHUB_OUTPUT"; exit 0
           fi
           case "${{ github.event.schedule }}" in
-            "30 1 * * *")  echo "job=morning"    >> "$GITHUB_OUTPUT";;
-            "30 15 * * *") echo "job=reflection" >> "$GITHUB_OUTPUT";;
-            "45 15 * * *") echo "job=daily"      >> "$GITHUB_OUTPUT";;
-            "0 16 * * *")  echo "job=collect"    >> "$GITHUB_OUTPUT";;
-            "30 12 * * 5") echo "job=weekly"     >> "$GITHUB_OUTPUT";;
-            "30 12 1 * *") echo "job=monthly"    >> "$GITHUB_OUTPUT";;
-            *)             echo "job=ping"       >> "$GITHUB_OUTPUT";;
+            "30 1 * * *")    echo "job=morning"    >> "$GITHUB_OUTPUT";;
+            "30 12 * * *")   echo "job=evening"    >> "$GITHUB_OUTPUT";;
+            "30 15 * * *")   echo "job=reflection" >> "$GITHUB_OUTPUT";;
+            "45 15 * * *")   echo "job=daily"      >> "$GITHUB_OUTPUT";;
+            "0 16 * * *")    echo "job=collect"    >> "$GITHUB_OUTPUT";;
+            "30 12 * * 5")   echo "job=weekly"     >> "$GITHUB_OUTPUT";;
+            "30 12 1 * *")   echo "job=monthly"    >> "$GITHUB_OUTPUT";;
+            "30 12 1 1,7 *") echo "job=halfyearly" >> "$GITHUB_OUTPUT";;
+            "0 13 1 1 *")    echo "job=yearly"     >> "$GITHUB_OUTPUT";;
+            *)               echo "job=ping"       >> "$GITHUB_OUTPUT";;
           esac
       - name: Run PA job
         env:
