@@ -855,12 +855,14 @@ def handle_callback(cb):
         answer_cb(cb["id"])
 
 # ----------------------------------------------------------------------------- LISTENER LOOP (near real-time)
-def job_listen(minutes=300):
-    """Long-poll Telegram for commands/buttons. Runs ~5h then exits (workflow restarts it)."""
+def job_listen(minutes=27):
+    """Long-poll Telegram for commands/buttons for ~27 min, then exit.
+    GitHub's scheduler launches a fresh run every 30 min, so the bot is effectively always on
+    and can never 'die' — no self-relaunch, no reliance on the blocked GITHUB_TOKEN.
+    The Telegram offset is saved to the sheet, so no message is missed across the handover."""
     c = config()
     offset = int(c.get("STATE_tg_offset", 0)) or None
     end = time.time() + minutes * 60
-    send("🟢 PA listener online — commands and buttons are live.")
     while time.time() < end:
         try:
             res = tg("getUpdates", offset=offset, timeout=25).get("result", [])
