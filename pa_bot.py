@@ -988,10 +988,10 @@ def _dispatch_text(txt):
     else:
         orchestrate(txt)
 
-def job_listen(minutes=13):
-    """Long-poll Telegram for commands/buttons for ~13 min, then exit.
-    GitHub's scheduler launches a fresh run every 15 min, so the bot is effectively always on
-    and can never 'die' — no self-relaunch, no reliance on the blocked GITHUB_TOKEN.
+def job_listen(minutes=340):
+    """Long-poll Telegram continuously for ~5.7h (Pinterest-style), then exit.
+    The workflow relaunches itself via a PAT the instant this ends, so it's one unbroken
+    always-on process with instant responses and no time-based cron.
     The Telegram offset is saved to the sheet, so no message is missed across the handover."""
     c = config()
     offset = int(c.get("STATE_tg_offset", 0)) or None
