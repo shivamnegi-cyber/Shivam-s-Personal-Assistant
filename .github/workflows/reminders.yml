@@ -1,0 +1,62 @@
+name: PA Reminders
+
+# Reminders now fire from the always-on listener (reliable), NOT from GitHub's flaky scheduler.
+# This workflow is kept only for MANUAL testing of an individual job via "Run workflow".
+
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run now (for testing)"
+        required: true
+        default: ping
+        type: choice
+        options: [ping, morning, reflection, collect, daily, weekly, monthly, report,
+                  evening, watchdog, halfyearly, yearly, appraisal]
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - name: Decide which job
+        id: pick
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "job=${{ github.event.inputs.job }}" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          case "${{ github.event.schedule }}" in
+            "30 1 * * *")    echo "job=morning"    >> "$GITHUB_OUTPUT";;
+            "30 12 * * *")   echo "job=evening"    >> "$GITHUB_OUTPUT";;
+            "30 15 * * *")   echo "job=reflection" >> "$GITHUB_OUTPUT";;
+            "45 15 * * *")   echo "job=daily"      >> "$GITHUB_OUTPUT";;
+            "0 16 * * *")    echo "job=collect"    >> "$GITHUB_OUTPUT";;
+            "30 12 * * 5")   echo "job=weekly"     >> "$GITHUB_OUTPUT";;
+            "30 12 1 * *")   echo "job=monthly"    >> "$GITHUB_OUTPUT";;
+            "30 12 1 1,7 *") echo "job=halfyearly" >> "$GITHUB_OUTPUT";;
+            "0 13 1 1 *")    echo "job=yearly"     >> "$GITHUB_OUTPUT";;
+            *)               echo "job=ping"       >> "$GITHUB_OUTPUT";;
+          esac
+      - name: Run PA job
+        env:
+          TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          SHEET_ID:          ${{ secrets.SHEET_ID }}
+          GOOGLE_SA_JSON:    ${{ secrets.GOOGLE_SA_JSON }}
+          GROQ_API_KEY:      ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY:    ${{ secrets.GEMINI_API_KEY }}
+          CEREBRAS_API_KEY:  ${{ secrets.CEREBRAS_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
+          MISTRAL_API_KEY:   ${{ secrets.MISTRAL_API_KEY }}
+          GH_MODELS_KEY:     ${{ secrets.GH_MODELS_KEY }}
+          NVIDIA_API_KEY:    ${{ secrets.NVIDIA_API_KEY }}
+          TOGETHER_API_KEY:  ${{ secrets.TOGETHER_API_KEY }}
+          SMTP_USER:         ${{ secrets.SMTP_USER }}
+          SMTP_PASS:         ${{ secrets.SMTP_PASS }}
+        run: python pa_bot.py ${{ steps.pick.outputs.job }}
