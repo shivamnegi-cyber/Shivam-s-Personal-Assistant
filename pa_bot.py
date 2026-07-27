@@ -380,14 +380,333 @@ def _tool_scorecard(_arg=""):
     tot_g = sum(g for _, g, _ in sc); tot_t = sum(t for _, _, t in sc)
     return "KRA scorecard —\n" + "\n".join(lines) + f"\nYear-to-date: {tot_g}/{tot_t}"
 
+# ---- Calendar (Google Calendar via the service account; user shares their calendar with it) ----
+def _cal_token():
+    from google.oauth2 import service_account
+    import google.auth.transport.requests as gtr
+    creds = service_account.Credentials.from_service_account_info(
+        json.loads(SA_JSON), scopes=["https://www.googleapis.com/auth/calendar"])
+    creds.refresh(gtr.Request())
+    return creds.token
+
+def _cal_id():
+    return (config().get("CALENDAR_ID", "") or "primary").strip()
+
+def _cal_fmt(ev):
+    s = ev.get("start", {})
+    st = s.get("dateTime", s.get("date", ""))
+    when = st[11:16] if "T" in st else (st + " (all day)")
+    loc = ev.get("location", "")
+    return f"• {when}  {ev.get('summary', '(no title)')}" + (f"  @ {loc}" if loc else "")
+
+def calendar_events(days=1):
+    import urllib.parse
+    try:
+        token = _cal_token()
+    except Exception as e:
+        return f"(calendar auth failed: {type(e).__name__})"
+    now = datetime.datetime.utcnow()
+    tmin = now.isoformat() + "Z"
+    tmax = (now + datetime.timedelta(days=days)).isoformat() + "Z"
+    cid = urllib.parse.quote(_cal_id())
+    r = requests.get(f"https://www.googleapis.com/calendar/v3/calendars/{cid}/events",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"timeMin": tmin, "timeMax": tmax, "singleEvents": "true",
+                "orderBy": "startTime", "maxResults": 25}, timeout=30)
+    if r.status_code != 200:
+        return f"(calendar error {r.status_code}: {r.text[:120]})"
+    items = r.json().get("items", [])
+    return "\n".join(_cal_fmt(e) for e in items) if items else "No events."
+
+def _tool_schedule(arg=""):
+    days = 7 if arg and any(w in arg.lower() for w in ("week", "7")) else \
+           (2 if arg and "tomorrow" in arg.lower() else 1)
+    return calendar_events(days)
+
+def _tool_add_event(arg):
+    import urllib.parse
+    j, _ = ai(system=("Extract a calendar event as JSON {\"title\":..,\"date\":\"YYYY-MM-DD\","
+                      "\"start\":\"HH:MM\" 24h,\"end\":\"HH:MM\",\"location\":\"\"}. "
+                      f"Today is {now_ist().strftime('%Y-%m-%d')} (Asia/Kolkata). Return ONLY JSON."),
+              prompt=arg, tier="quick")
+    try:
+        d = json.loads(re.search(r"\{.*\}", j, re.DOTALL).group())
+    except Exception:
+        return "Couldn't work out the event details — try 'meeting with X on Fri 3pm'."
+    try:
+        token = _cal_token()
+    except Exception as e:
+        return f"(calendar auth failed: {type(e).__name__})"
+    start = f"{d.get('date')}T{d.get('start', '09:00')}:00"
+    end = f"{d.get('date')}T{d.get('end') or d.get('start', '10:00')}:00"
+    body = {"summary": d.get("title", "Event"), "location": d.get("location", ""),
+            "start": {"dateTime": start, "timeZone": "Asia/Kolkata"},
+            "end": {"dateTime": end, "timeZone": "Asia/Kolkata"}}
+    cid = urllib.parse.quote(_cal_id())
+    r = requests.post(f"https://www.googleapis.com/calendar/v3/calendars/{cid}/events",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json=body, timeout=30)
+    if r.status_code in (200, 201):
+        return f"Scheduled '{d.get('title')}' on {d.get('date')} at {d.get('start')}."
+    return f"(calendar error {r.status_code}: {r.text[:120]})"
+
+# ---- Inbox (Gmail via IMAP read with the app password; send uses SMTP) ----
+def inbox_recent(n=8):
+    import imaplib, email
+    from email.header import decode_header, make_header
+    user, pw = os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", "")
+    if not (user and pw):
+        return "(email not set up — add SMTP_USER/SMTP_PASS)"
+    try:
+        M = imaplib.IMAP4_SSL("imap.gmail.com"); M.login(user, pw); M.select("INBOX")
+        typ, data = M.search(None, "UNSEEN")
+        ids = data[0].split()[-n:]
+        rows = []
+        for i in reversed(ids):
+            typ, d = M.fetch(i, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")
+            hdr = email.message_from_bytes(d[0][1])
+            frm = str(make_header(decode_header(hdr.get("From", "")))).split("<")[0].strip()
+            sub = str(make_header(decode_header(hdr.get("Subject", ""))))
+            rows.append(f"- {frm[:26]}: {sub[:72]}")
+        M.logout()
+        return "Unread:\n" + "\n".join(rows) if rows else "No unread emails."
+    except Exception as e:
+        return f"(email error: {type(e).__name__} — check the app password)"
+
+def _tool_inbox(arg=""):
+    return inbox_recent(10)
+
+def inbox_top_unread(limit=8):
+    import imaplib, email
+    from email.header import decode_header, make_header
+    user, pw = os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", "")
+    if not (user and pw):
+        return None
+    try:
+        M = imaplib.IMAP4_SSL("imap.gmail.com"); M.login(user, pw); M.select("INBOX")
+        typ, data = M.search(None, "UNSEEN")
+        ids = data[0].split()[-limit:]
+        out = []
+        for i in reversed(ids):
+            typ, d = M.fetch(i, "(BODY.PEEK[])")
+            msg = email.message_from_bytes(d[0][1])
+            frm = str(make_header(decode_header(msg.get("From", ""))))
+            sub = str(make_header(decode_header(msg.get("Subject", ""))))
+            body = ""
+            if msg.is_multipart():
+                for p in msg.walk():
+                    if p.get_content_type() == "text/plain":
+                        pl = p.get_payload(decode=True)
+                        if pl:
+                            body = pl.decode(errors="ignore"); break
+            else:
+                pl = msg.get_payload(decode=True)
+                body = pl.decode(errors="ignore") if pl else ""
+            out.append({"from": frm, "subject": sub, "msgid": msg.get("Message-ID", ""),
+                        "body": body[:1500]})
+        M.logout()
+        return out
+    except Exception:
+        return None
+
+def _tool_email_to_tasks(arg=""):
+    msgs = inbox_top_unread(6)
+    if not msgs:
+        return "No unread emails (or email not set up)."
+    blob = "\n\n".join(f"From {m['from']} | {m['subject']}\n{m['body'][:500]}" for m in msgs)
+    j, _ = ai(system=("From these emails, extract concrete action items for Shivam as a JSON array of "
+                      "{\"task\":..,\"priority\":\"P1|P2|P3\",\"due\":\"YYYY-MM-DD or ''\"}. "
+                      f"Today {now_ist().strftime('%Y-%m-%d')}. Only real actions; return ONLY a JSON array."),
+              prompt=blob, tier="deep")
+    try:
+        arr = json.loads(re.search(r"\[.*\]", j, re.DOTALL).group())
+    except Exception:
+        arr = []
+    if not arr:
+        return "No clear action items in your unread email."
+    added = []
+    for d in arr[:8]:
+        tid = f"T{int(time.time()*10)%1000000}"
+        ws("PA_Tasks").append_row([tid, d.get("task", ""), "Email", (d.get("priority") or "P2").upper(),
+                                   d.get("due") or "", "Open", now_ist().strftime("%b %Y"), "", "from email"])
+        added.append(d.get("task", "")); time.sleep(0.05)
+    log_event("email_tasks", f"{len(added)} from email")
+    return "Added from email:\n" + "\n".join(f"• {a}" for a in added)
+
+def _tool_draft_reply(arg):
+    msgs = inbox_top_unread(8)
+    if not msgs:
+        return "No unread emails to reply to."
+    ws_ = set(re.findall(r"[a-z0-9]+", arg.lower()))
+    def sc(m): return len(ws_ & set(re.findall(r"[a-z0-9]+", (m["from"] + " " + m["subject"]).lower())))
+    target = max(msgs, key=sc) if any(sc(m) for m in msgs) else msgs[0]
+    draft, _ = ai(system=("Draft a concise, professional email reply for Shivam Negi (Internal Auditor & "
+                          "Trainer, Moustache). Plain text, English only, sign off 'Regards, Shivam'."),
+                  prompt=f"Email from {target['from']}, subject '{target['subject']}':\n{target['body']}\n\n"
+                         f"Shivam wants to say: {arg}", tier="deep")
+    draft = draft or "Regards,\nShivam"
+    set_config("STATE_email_to", target["from"]); set_config("STATE_email_subject", target["subject"])
+    set_config("STATE_email_msgid", target["msgid"]); set_config("STATE_email_draft", draft)
+    send(f"✉️ <b>Draft reply</b> to {html.escape(target['from'].split('<')[0][:30])}\n"
+         f"Re: {html.escape(target['subject'][:60])}\n\n{html.escape(draft)}\n\n"
+         "<i>Reply with edits, or approve to send.</i>",
+         buttons=[[btn("✅ Send", "email:send"), btn("✏️ Edit", "email:edit")], [btn("❌ Cancel", "email:cancel")]])
+    return "__SENT__"
+
+def _clear_email_state():
+    for k in ("STATE_email_to", "STATE_email_subject", "STATE_email_msgid", "STATE_email_draft"):
+        set_config(k, "")
+
+def revise_email(instr):
+    draft = config().get("STATE_email_draft", "")
+    new, _ = ai(system="Revise the email reply per the instruction. Plain text, English, sign 'Regards, Shivam'. "
+                       "Return the full revised email only.",
+                prompt=f"Current:\n{draft}\n\nInstruction: {instr}", tier="deep")
+    set_config("STATE_email_draft", new or draft)
+    send(f"✏️ <b>Updated draft</b>\n\n{html.escape(new or draft)}\n\n<i>More edits, or approve to send.</i>",
+         buttons=[[btn("✅ Send", "email:send"), btn("✏️ Edit", "email:edit")], [btn("❌ Cancel", "email:cancel")]])
+
+def send_email_reply():
+    c = config()
+    to_full = c.get("STATE_email_to", ""); subject = c.get("STATE_email_subject", "")
+    msgid = c.get("STATE_email_msgid", ""); draft = c.get("STATE_email_draft", "")
+    m = re.search(r"<([^>]+)>", to_full); addr = m.group(1) if m else to_full.strip()
+    user, pw = os.environ.get("SMTP_USER", ""), os.environ.get("SMTP_PASS", "")
+    if not (user and pw):
+        return send("Email isn't set up (SMTP_USER/SMTP_PASS).")
+    import smtplib
+    from email.message import EmailMessage
+    em = EmailMessage(); em["From"] = user; em["To"] = addr
+    em["Subject"] = subject if subject.lower().startswith("re:") else "Re: " + subject
+    if msgid:
+        em["In-Reply-To"] = msgid; em["References"] = msgid
+    em.set_content(draft)
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+            s.starttls(); s.login(user, pw); s.send_message(em)
+        _clear_email_state(); send(f"✅ Reply sent to {html.escape(addr)}.")
+    except Exception as e:
+        send(f"⚠️ Couldn't send: <code>{html.escape(str(e))}</code>")
+
+# ---- Long-term memory (PA_Memory) ----
+def _tool_remember(arg):
+    j, _ = ai(system=("Extract a memory as JSON {\"category\":\"person|contact|preference|context\","
+                      "\"key\":..,\"value\":..}. Return ONLY JSON."), prompt=arg, tier="quick")
+    try:
+        d = json.loads(re.search(r"\{.*\}", j, re.DOTALL).group())
+    except Exception:
+        d = {"category": "context", "key": arg[:40], "value": arg}
+    try:
+        ws("PA_Memory").append_row([f"M{int(time.time())%100000}", d.get("category", "context"),
+                                    d.get("key", ""), d.get("value", arg), ""])
+    except Exception:
+        return "Saved (couldn't reach PA_Memory tab)."
+    return f"Noted — {d.get('key','')}: {str(d.get('value',''))[:60]}"
+
+def _tool_recall_memory(arg):
+    try:
+        rows = ws("PA_Memory").get_all_records()
+    except Exception:
+        return "Nothing in memory yet."
+    if not rows:
+        return "Nothing in memory yet."
+    wds = set(re.findall(r"[a-z0-9]+", arg.lower()))
+    def sc(r): return len(wds & set(re.findall(r"[a-z0-9]+", f"{r.get('Key','')} {r.get('Value','')}".lower())))
+    hits = sorted(rows, key=sc, reverse=True)
+    picks = [r for r in hits if sc(r) > 0][:6] or hits[:5]
+    return "\n".join(f"• <b>{html.escape(str(r.get('Key','')))}</b>: {html.escape(str(r.get('Value','')))}" for r in picks)
+
+# ---- Follow-ups / waiting-on (PA_Followups) ----
+def open_followups():
+    try:
+        rows = ws("PA_Followups").get_all_records()
+    except Exception:
+        return []
+    return [r for r in rows if str(r.get("Status", "")).strip().lower() in ("", "open")
+            and str(r.get("Item", "")).strip()]
+
+def _tool_add_followup(arg):
+    j, _ = ai(system=("Extract a waiting-on item as JSON {\"item\":..,\"who\":..,\"due\":\"YYYY-MM-DD or ''\"}. "
+                      f"Today {now_ist().strftime('%Y-%m-%d')}. Return ONLY JSON."), prompt=arg, tier="quick")
+    try:
+        d = json.loads(re.search(r"\{.*\}", j, re.DOTALL).group())
+    except Exception:
+        d = {"item": arg, "who": "", "due": ""}
+    ws("PA_Followups").append_row([f"F{int(time.time())%100000}", d.get("item", arg), d.get("who", ""),
+                                   now_ist().strftime("%Y-%m-%d"), d.get("due", ""), "Open", ""])
+    return f"Tracking: {d.get('item', arg)} (waiting on {d.get('who') or '—'})"
+
+def _tool_list_followups(arg=""):
+    fu = open_followups()
+    if not fu:
+        return "No open follow-ups."
+    return "\n".join(f"• {r.get('Item')} — {r.get('Waiting On') or '—'}"
+                     + (f" (due {r.get('Due')})" if str(r.get('Due', '')).strip() else "") for r in fu)
+
+def _tool_complete_followup(arg):
+    w = ws("PA_Followups")
+    rows = w.get_all_records()
+    wds = set(re.findall(r"[a-z0-9]+", arg.lower()))
+    best, bi, bs = None, 0, 0
+    for idx, r in enumerate(rows, 2):
+        s = len(wds & set(re.findall(r"[a-z0-9]+", str(r.get("Item", "")).lower())))
+        if s > bs:
+            bs, best, bi = s, r, idx
+    if best and bs >= 1:
+        hdr = w.row_values(1)
+        if "Status" in hdr:
+            w.update_cell(bi, hdr.index("Status") + 1, "Done")
+        return f"Closed: {best.get('Item')}"
+    return "Couldn't find that follow-up."
+
+# ---- Proactive watchdog ----
+def _watchdog_text():
+    parts, today = [], now_ist().date()
+    overdue = []
+    for t in open_tasks():
+        due = str(t.get("Due Date", "")).strip()
+        try:
+            if due and datetime.date.fromisoformat(due) < today:
+                overdue.append(t)
+        except Exception:
+            pass
+    if overdue:
+        parts.append("<b>Overdue</b>\n" + "\n".join(f"• {t.get('Task')} (due {t.get('Due Date')})" for t in overdue[:6]))
+    mon, kras = kra_current()
+    pending = [k for k, s in kras if not str(s).strip()]
+    if pending and today.day >= 20:
+        parts.append("<b>KRAs still open this month</b>\n" + "\n".join(f"• {k}" for k in pending[:6]))
+    fu = open_followups()
+    if fu:
+        parts.append("<b>Waiting on</b>\n" + "\n".join(f"• {r.get('Item')} — {r.get('Waiting On') or '—'}" for r in fu[:6]))
+    return "\n\n".join(parts)
+
+def job_watchdog():
+    txt = _watchdog_text()
+    if txt:
+        send("🔔 <b>Heads-up</b>\n\n" + txt)
+
+def job_evening():
+    job_watchdog()
+
 TOOLS = {
     "web_search":    (lambda a: research(a),   "Search the web; returns a synthesised answer. Arg = the query."),
+    "schedule":      (_tool_schedule,          "Read the calendar. Arg = 'today'/'tomorrow'/'week'."),
+    "add_event":     (_tool_add_event,         "Create a calendar event. Arg = 'meeting with X on Fri 3pm at Y'."),
+    "inbox":         (_tool_inbox,             "List unread emails (sender + subject). Arg ignored."),
     "list_tasks":    (_tasks_text,             "List Shivam's open tasks, ranked. Arg ignored."),
     "add_task":      (_tool_add,               "Add a task. Arg = natural description incl. priority/date."),
     "complete_task": (_tool_complete,          "Mark a task done. Arg = a few words identifying the task."),
     "kra_scorecard": (_tool_scorecard,         "KRA scores per month + year-to-date. Arg ignored."),
     "capture":       (_tool_capture,           "Save a thought/link/idea/note for later. Arg = the thing to remember."),
     "recall":        (_tool_recall,            "Find previously captured notes. Arg = what he's looking for."),
+    "remember":      (_tool_remember,          "Save a durable fact/person/contact/preference to long-term memory."),
+    "recall_memory": (_tool_recall_memory,     "Look up something from long-term memory. Arg = what he's asking about."),
+    "add_followup":  (_tool_add_followup,      "Track something he's waiting on from someone. Arg = the item + who."),
+    "list_followups":(_tool_list_followups,    "List open follow-ups / waiting-on items. Arg ignored."),
+    "close_followup":(_tool_complete_followup, "Close a follow-up. Arg = a few words identifying it."),
+    "email_to_tasks":(_tool_email_to_tasks,    "Scan unread email and add action items as tasks. Arg ignored."),
+    "draft_reply":   (_tool_draft_reply,       "Draft a reply to an unread email for approval. Arg = which email + what to say."),
 }
 
 # ---- AGENTS (registry) -----------------------------------------------------
@@ -395,7 +714,8 @@ AGENTS = {
     "chief": {
         "desc": "General assistant, planner and router. Handles anything not clearly another agent's job: "
                 "questions, advice, chit-chat, mixed requests.",
-        "tools": ["web_search", "list_tasks", "add_task", "complete_task", "kra_scorecard"],
+        "tools": ["web_search", "list_tasks", "add_task", "complete_task", "kra_scorecard",
+                  "remember", "recall_memory", "add_followup", "list_followups", "close_followup"],
         "tier": "deep",
         "persona": "You are Shivam Negi's Chief of Staff. He's an Internal Auditor & Trainer at Moustache "
                    "(India Hostels). Be sharp, proactive and concise.",
@@ -420,6 +740,27 @@ AGENTS = {
         "persona": "You are Shivam's Research Analyst for hospitality (hostels), internal audit and training "
                    "in India. Always search before answering; be specific and practical; cite sources.",
     },
+    "calendar": {
+        "desc": "Schedule & meetings: 'what's on my calendar', 'am I free tomorrow', 'schedule/add a meeting'.",
+        "tools": ["schedule", "add_event"],
+        "tier": "quick",
+        "persona": "You are Shivam's Calendar manager. Read his schedule and create events precisely. "
+                   "State times clearly. Confirm briefly.",
+    },
+    "inbox": {
+        "desc": "Email: check/summarise unread, turn emails into tasks, or draft a reply to send.",
+        "tools": ["inbox", "email_to_tasks", "draft_reply"],
+        "tier": "deep",
+        "persona": "You are Shivam's Inbox manager. Summarise unread email crisply and flag action items. "
+                   "If he asks to reply, use draft_reply (he approves before it sends). If he asks to log "
+                   "tasks from email, use email_to_tasks. Never invent emails.",
+    },
+    "memory": {
+        "desc": "Remember or recall durable facts, people, contacts, preferences ('remember...', 'what's X's email').",
+        "tools": ["remember", "recall_memory"],
+        "tier": "quick",
+        "persona": "You are Shivam's long-term Memory. Save what he asks and recall precisely.",
+    },
     "coach": {
         "desc": "Nightly reflection / check-in and light motivation.",
         "tools": [], "tier": "quick", "action": "reflect",
@@ -437,8 +778,9 @@ STYLE = ("Voice: reply like a sharp, professional human assistant texting Shivam
          "'as an AI'). NEVER announce formatting. Avoid rigid headers like 'Priority 1 (P1):'. "
          "Just say it plainly — a short line or a couple of simple bullets, only when they help. "
          "You may use <b>bold</b> sparingly for a key word. "
-         "LANGUAGE: reply in the SAME language and script Shivam used — English if English, "
-         "Hindi (Devanagari) if he wrote/spoke Hindi, or Hinglish if he mixed. Mirror him naturally.")
+         "LANGUAGE: ALWAYS reply in the English (Latin/Roman) alphabet — never Devanagari or any "
+         "Hindi script. You understand Hindi and Hinglish input perfectly, but your replies must be "
+         "in English; a Hindi word is fine only if written in Roman letters (Hinglish).")
 
 def agent_run(name, text, depth=0):
     a = AGENTS[name]
@@ -466,7 +808,10 @@ def agent_run(name, text, depth=0):
             tool, _, arg = rest.partition("|")
             tool = tool.strip()
             if tool in TOOLS:
-                ctx += f"\n[{tool} → {TOOLS[tool][0](arg.strip())}]\n"
+                obs = TOOLS[tool][0](arg.strip())
+                if obs == "__SENT__":      # tool already messaged the user (buttons/approval flow)
+                    return ""
+                ctx += f"\n[{tool} → {obs}]\n"
             else:
                 ctx += f"\n[no tool '{tool}']\n"
         elif head == "HANDOFF" and depth < 2:
@@ -484,6 +829,19 @@ def agent_run(name, text, depth=0):
 
 def orchestrate(text):
     """Chief-of-Staff routing: pick the best agent, run it, send the reply."""
+    low = text.lower()
+    if re.search(r"\breport\b", low) and re.search(r"\b(generate|make|create|draft|prepare|send|do)\b", low):
+        if "appraisal" in low:
+            kind = "appraisal"
+        elif "week" in low:
+            kind = "weekly"
+        elif "half" in low or "6 month" in low or "6-month" in low:
+            kind = "halfyearly"
+        elif "year" in low or "annual" in low:
+            kind = "yearly"
+        else:
+            kind = "monthly"
+        return job_report(kind)
     tg("sendChatAction", chat_id=TG_CHAT, action="typing")
     desc = "\n".join(f"- {n}: {a['desc']}" for n, a in AGENTS.items())
     pick, _ = ai(system=("Route Shivam's message to ONE agent. Reply with ONLY the agent name.\n"
@@ -502,25 +860,32 @@ def job_ping():
          buttons=[[btn("👋 Say hi", "ping:hi")], [btn("📋 Today's tasks", "cmd:today")]])
 
 def job_morning():
-    tasks = rank_tasks(open_tasks())
     d = now_ist().strftime("%A, %d %b")
-    if not tasks:
-        send(f"☀️ <b>Good morning, Shivam</b> — {d}\nNo open tasks in your sheet. "
-             "Add one with <code>/add</code> or enjoy the clear runway.")
-        return
+    tasks = rank_tasks(open_tasks())
     top = tasks[:5]
-    lines = [f"☀️ <b>Good morning, Shivam</b>", f"Your Top {len(top)} for today — {d}\n"]
-    rows = []
-    for i, t in enumerate(top, 1):
-        due = str(t.get("Due Date", "")).strip()
-        due_s = f" · due {due}" if due else ""
-        lines.append(f"<b>{i}.</b> [{t.get('Priority','P3')}] {html.escape(str(t.get('Task','')))}{due_s}")
-    for i, t in enumerate(top, 1):
-        rows.append(btn(f"✅ {i}", f"done:{t.get('Task ID','')}"))
+    lines = ["☀️ <b>Good morning, Shivam</b>", f"{d}\n"]
+    # today's meetings (skipped silently if calendar isn't set up)
+    mtg = calendar_events(1)
+    if mtg and not mtg.startswith("(") and mtg != "No events.":
+        lines.append("<b>Today's meetings</b>")
+        lines.append(mtg + "\n")
+    if top:
+        lines.append(f"<b>Top {len(top)} tasks</b>")
+        for i, t in enumerate(top, 1):
+            due = str(t.get("Due Date", "")).strip()
+            due_s = f" · due {due}" if due else ""
+            lines.append(f"{i}. [{t.get('Priority','P3')}] {html.escape(str(t.get('Task','')))}{due_s}")
+    else:
+        lines.append("No open tasks — clear runway.")
+    heads = _watchdog_text()
+    if heads:
+        lines.append("")
+        lines.append("🔔 " + heads)
     nudge, _ = ai(prompt="One short, warm one-line nudge to start the workday. No emoji.", tier="fast")
-    nudge = nudge or "One focused block at a time — you've got this."
-    lines.append(f"\n<i>{html.escape(nudge)}</i>")
-    send("\n".join(lines), buttons=[rows, [btn("➕ Add task", "cmd:addhelp")]])
+    lines.append(f"\n<i>{html.escape(nudge or 'One focused block at a time.')}</i>")
+    rows = [btn(f"✅ {i}", f"done:{t.get('Task ID','')}") for i, t in enumerate(top, 1)]
+    kb = ([rows] if rows else []) + [[btn("➕ Add task", "cmd:addhelp")]]
+    send("\n".join(lines), buttons=kb)
 
 def job_reflection():
     c = config()
@@ -628,7 +993,7 @@ def kra_scorecard(rows=None):
     return [(m, by_month[m][0], by_month[m][1]) for m in order]
 
 def _report_context(kind):
-    days = 7 if kind == "weekly" else 31
+    days = {"weekly": 7, "monthly": 31, "halfyearly": 183, "yearly": 366, "appraisal": 366}.get(kind, 31)
     log = _log_rows(days)
     tasks = rank_tasks(open_tasks())
     open_list = "\n".join(
@@ -648,14 +1013,24 @@ def job_report(kind="monthly"):
     """Generate an interactive report draft: review & revise in chat, then auto-email on approval."""
     c = config()
     log, open_list, kra_txt, ytd_txt, mon = _report_context(kind)
-    period = (f"Week ending {now_ist().strftime('%d %b %Y')}" if kind == "weekly"
-              else f"{mon} {now_ist().year}")
-    sysp = (f"You are Shivam Negi's chief-of-staff writing a {kind} progress report for his Director, "
-            f"{c.get('DIRECTOR_NAME', 'the Director')}. Shivam is Internal Auditor & Trainer at "
-            "Moustache (India Hostels). EXECUTIVE STYLE — keep it short and skimmable, NOT a long report. "
-            "Start with a 2–3 line <b>Executive Summary</b>. Then concise one-line bullets (use •) under: "
-            "<b>KRA progress</b> (each KRA + its score), <b>Key completions</b>, <b>In-progress / Blocked</b>, "
-            "<b>Next period</b>. No paragraphs, no filler — each bullet ≤ 15 words. Telegram HTML only.")
+    yr = now_ist().year
+    period = {"weekly": f"Week ending {now_ist().strftime('%d %b %Y')}",
+              "monthly": f"{mon} {yr}",
+              "halfyearly": f"H{1 if now_ist().month <= 6 else 2} {yr}",
+              "yearly": f"Year {yr}",
+              "appraisal": f"Self-appraisal {yr}"}.get(kind, f"{mon} {yr}")
+    if kind == "appraisal":
+        sysp = ("Write Shivam Negi's year-end SELF-APPRAISAL (Internal Auditor & Trainer at Moustache). "
+                "First person, honest and professional, for his own performance review. EXECUTIVE STYLE, "
+                "concise bullets (•). Sections: <b>Summary</b>, <b>Key achievements</b> (cite KRA scores), "
+                "<b>Areas to improve</b>, <b>Goals for next year</b>. Telegram HTML only, English.")
+    else:
+        sysp = (f"You are Shivam Negi's chief-of-staff writing a {kind} progress report for his Director, "
+                f"{c.get('DIRECTOR_NAME', 'the Director')}. Shivam is Internal Auditor & Trainer at "
+                "Moustache (India Hostels). EXECUTIVE STYLE — short and skimmable, NOT a long report. "
+                "Start with a 2–3 line <b>Executive Summary</b>. Then concise one-line bullets (•) under: "
+                "<b>KRA progress</b> (each KRA + its score), <b>Key completions</b>, <b>In-progress / Blocked</b>, "
+                "<b>Next period</b>. No paragraphs, no filler — each bullet ≤ 15 words. Telegram HTML only.")
     prompt = (f"Period: {period}\nYear-to-date KRA scores: {ytd_txt}\n\n"
               f"This month's KRAs:\n{kra_txt}\n\nOpen tasks:\n{open_list}\n\nActivity log:\n{log}")
     draft, _ = ai(system=sysp, prompt=prompt, purpose="long")
@@ -741,8 +1116,9 @@ def send_report():
         return send("There's no report draft to send. Say “generate report” to start one.")
     director = c.get("DIRECTOR_EMAIL", "").strip()
     me = os.environ.get("SMTP_USER", "").strip()
-    to_list = [director] if director else []
-    subject = f"{kind.title()} Report — {c.get('OWNER_NAME','Shivam Negi')} — {period}"
+    to_list = ([me] if me else []) if kind == "appraisal" else ([director] if director else [])
+    label = "Self-Appraisal" if kind == "appraisal" else f"{kind.title()} Report"
+    subject = f"{label} — {c.get('OWNER_NAME','Shivam Negi')} — {period}"
     pdf = build_pdf(subject, draft)
     ok, err = email_report(subject, draft, pdf, to_list, cc=[me] if me else None)
     try:
@@ -752,8 +1128,8 @@ def send_report():
         pass
     if ok:
         _clear_report_state()
-        send(f"📤 Sent the {kind} report to <b>{director or 'nobody set'}</b> "
-             f"(copy to you). Archived in PA_Reports. ✅")
+        send(f"📤 Sent the {label.lower()} to <b>{', '.join(to_list) or 'nobody set'}</b>. "
+             "Archived in PA_Reports. ✅")
     else:
         send(f"⚠️ Couldn't email it: <code>{html.escape(err)}</code>\nDraft kept — fix and try again. "
              "(Check SMTP_USER/SMTP_PASS secrets and DIRECTOR_EMAIL in PA_Config.)")
@@ -873,6 +1249,15 @@ def handle_callback(cb):
             _clear_report_state(); send("❌ Report cancelled — nothing sent.")
         else:
             send("✏️ Tell me the changes and I'll revise the draft.")
+    elif data.startswith("email:"):
+        act = data.split(":", 1)[1]
+        answer_cb(cb["id"], act)
+        if act == "send":
+            send_email_reply()
+        elif act == "cancel":
+            _clear_email_state(); send("❌ Reply cancelled.")
+        else:
+            send("✏️ Tell me the changes and I'll revise the reply.")
     else:
         answer_cb(cb["id"])
 
@@ -942,13 +1327,22 @@ def vision(data, prompt):
             errors.append(f"gemini: {type(e).__name__}")
     return "", " | ".join(errors[:4])
 
+def _romanize(text):
+    """If the text contains Devanagari, transliterate to Roman/Hinglish (no Hindi script anywhere)."""
+    if not text or not re.search(r"[ऀ-ॿ]", text):
+        return text
+    out, _ = ai(system="Transliterate the text into the Latin/Roman alphabet (Hinglish). Keep the "
+                       "original words and meaning; do NOT translate to English. Output only the result.",
+                prompt=text, tier="quick")
+    return out or text
+
 def handle_voice(file_id):
     tg("sendChatAction", chat_id=TG_CHAT, action="typing")
     try:
         data, _ = tg_download(file_id)
     except Exception:
         return send("Couldn't fetch that voice note — try again.")
-    txt = transcribe(data)
+    txt = _romanize(transcribe(data))
     if not txt:
         return send("Couldn't transcribe that — the audio may be unclear. Try again or type it.")
     send(f"🎙️ <i>{html.escape(txt)}</i>")
@@ -968,17 +1362,38 @@ def handle_photo(file_id, caption=""):
     out, err = vision(data, prompt)
     if not out:
         return send("Couldn't read that image.\n<i>" + html.escape(err or "no vision model available") + "</i>")
-    send(out + "\n\n<i>Want me to add any of these as tasks? Just say which.</i>")
+    # auto-save a contact if this looks like a business card (memory: auto mode)
+    saved = ""
+    try:
+        cj, _ = ai(system="If this text is a business card/contact, return JSON "
+                          "{name,role,company,phone,email,website}; otherwise return exactly NONE.",
+                   prompt=out, tier="quick")
+        if "NONE" not in cj.upper():
+            c = json.loads(re.search(r"\{.*\}", cj, re.DOTALL).group())
+            if c.get("name"):
+                val = ", ".join(f"{k}: {c[k]}" for k in ("role", "company", "phone", "email", "website") if c.get(k))
+                ws("PA_Memory").append_row([f"M{int(time.time())%100000}", "contact", c["name"], val, "from card"])
+                saved = f"\n\n<i>Saved {html.escape(c['name'])} to your contacts.</i>"
+    except Exception:
+        pass
+    send(out + saved + "\n\n<i>Want me to add any of these as tasks? Just say which.</i>")
 
 def _dispatch_text(txt):
     """Route a text message (from typing OR transcribed voice) to the right handler."""
     if txt.startswith("/"):
         return handle_command(txt, None)
     st = config()
+    low = txt.strip().lower()
     if st.get("STATE_awaiting_reflection") == "1":
         job_collect()
+    elif st.get("STATE_email_draft"):
+        if low in ("send", "send it", "approve", "yes send", "ok send"):
+            send_email_reply()
+        elif low in ("cancel", "stop", "discard", "no"):
+            _clear_email_state(); send("❌ Reply cancelled.")
+        else:
+            revise_email(txt)
     elif st.get("STATE_report_mode"):
-        low = txt.strip().lower()
         if low in ("send", "send it", "approve", "approve & send", "ok send", "yes send"):
             send_report()
         elif low in ("cancel", "stop", "discard", "no"):
@@ -1031,7 +1446,11 @@ def main():
     job = sys.argv[1] if len(sys.argv) > 1 else "ping"
     fn = {"ping": job_ping, "morning": job_morning, "reflection": job_reflection,
           "collect": job_collect, "daily": job_daily, "weekly": job_weekly,
-          "monthly": job_monthly, "report": job_report, "listen": job_listen}.get(job)
+          "monthly": job_monthly, "report": job_report, "listen": job_listen,
+          "evening": job_evening, "watchdog": job_watchdog,
+          "halfyearly": lambda: job_report("halfyearly"),
+          "yearly": lambda: job_report("yearly"),
+          "appraisal": lambda: job_report("appraisal")}.get(job)
     if not fn:
         print("Unknown job:", job); sys.exit(1)
     try:
