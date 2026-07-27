@@ -137,9 +137,23 @@ def tg(method, **payload):
     return r.json()
 
 def _md_to_tg(t):
-    """Clean model output into Telegram-safe HTML: drop code fences, convert markdown."""
+    """Clean model output into Telegram-safe HTML: drop meta-preambles, code fences, convert markdown."""
     if not t:
         return t
+    # drop a leaked leading meta/preamble line (e.g. "Here's your list in Telegram HTML format, Shivam:")
+    lines = t.split("\n")
+    for _ in range(2):
+        i = 0
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i < len(lines):
+            first = lines[i].strip()
+            if re.search(r"(?i)(telegram html|html format)", first) or \
+               re.search(r"(?i)^here'?s\b.{0,90}:$", first):
+                del lines[:i + 1]
+                continue
+        break
+    t = "\n".join(lines).lstrip("\n")
     t = re.sub(r"```[a-zA-Z]*\n?", "", t).replace("```", "")   # code fences
     t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t, flags=re.DOTALL)  # **bold**
     t = re.sub(r"__(.+?)__", r"<b>\1</b>", t, flags=re.DOTALL)      # __bold__
@@ -411,12 +425,18 @@ AGENTS = {
         "tools": [], "tier": "quick", "action": "reflect",
         "persona": "You are Shivam's Coach.",
     },
-    "reporter": {
-        "desc": "Weekly/monthly progress reports for the Director. (Report engine currently paused.)",
-        "tools": ["kra_scorecard", "list_tasks"], "tier": "long", "action": "report",
-        "persona": "You are Shivam's Reporter.",
+    "scorecard": {
+        "desc": "Show KRA scores / progress: 'my scorecard', 'how am I doing on KRAs', month or year-to-date totals.",
+        "tools": ["kra_scorecard", "list_tasks"], "tier": "quick",
+        "persona": "You are Shivam's KRA scorekeeper. Read the numbers and state them plainly.",
     },
 }
+
+STYLE = ("Voice: reply like a sharp, professional human assistant texting Shivam directly. "
+         "Natural and concise. NEVER add meta-text ('Here's your...', 'in Telegram HTML format', "
+         "'as an AI'). NEVER announce formatting. Avoid rigid headers like 'Priority 1 (P1):'. "
+         "Just say it plainly — a short line or a couple of simple bullets, only when they help. "
+         "You may use <b>bold</b> sparingly for a key word.")
 
 def agent_run(name, text, depth=0):
     a = AGENTS[name]
@@ -426,11 +446,11 @@ def agent_run(name, text, depth=0):
         job_report("monthly"); return ""
     tool_desc = "\n".join(f"  {t}: {TOOLS[t][1]}" for t in a["tools"]) or "  (none)"
     others = ", ".join(n for n in AGENTS if n != name)
-    sysp = (a["persona"] + "\n\nTOOLS:\n" + tool_desc +
+    sysp = (a["persona"] + "\n\n" + STYLE + "\n\nTOOLS:\n" + tool_desc +
             "\n\nRespond with EXACTLY ONE line, one of:\n"
             "  USE <tool> | <argument>\n"
             f"  HANDOFF <agent> | <subtask>   (agents: {others})\n"
-            "  REPLY <your final answer to Shivam, Telegram HTML, concise>\n"
+            "  REPLY <your natural, concise answer>\n"
             "Call a tool when it helps; hand off if another agent fits better; else REPLY.")
     ctx = f"Shivam said: {text}\n"
     for _ in range(4):
@@ -457,7 +477,7 @@ def agent_run(name, text, depth=0):
             return rest.strip()
         else:
             return step.strip()   # model replied plainly
-    final, _ = ai(system="Give Shivam the final answer, concise, Telegram HTML.", prompt=ctx, tier="long")
+    final, _ = ai(system="Give Shivam the answer directly and naturally. " + STYLE, prompt=ctx, tier="long")
     return final or "Done."
 
 def orchestrate(text):
@@ -855,9 +875,9 @@ def handle_callback(cb):
         answer_cb(cb["id"])
 
 # ----------------------------------------------------------------------------- LISTENER LOOP (near real-time)
-def job_listen(minutes=27):
-    """Long-poll Telegram for commands/buttons for ~27 min, then exit.
-    GitHub's scheduler launches a fresh run every 30 min, so the bot is effectively always on
+def job_listen(minutes=13):
+    """Long-poll Telegram for commands/buttons for ~13 min, then exit.
+    GitHub's scheduler launches a fresh run every 15 min, so the bot is effectively always on
     and can never 'die' — no self-relaunch, no reliance on the blocked GITHUB_TOKEN.
     The Telegram offset is saved to the sheet, so no message is missed across the handover."""
     c = config()
