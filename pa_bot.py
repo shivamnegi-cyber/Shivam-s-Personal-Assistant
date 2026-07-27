@@ -10,7 +10,7 @@ PA_DailyLog, and later PA_Calendar, PA_Inbox, PA_Reports). Talks to you on Teleg
 buttons + slash-commands. Thinks with a crew of FREE AI providers (auto-fallback) and can
 research the web when asked.
 """
-import os, sys, json, time, html, re, datetime, traceback
+import os, sys, json, time, html, re, datetime, traceback, base64
 import requests
 
 # ----------------------------------------------------------------------------- ENV / SECRETS
@@ -875,6 +875,103 @@ def handle_callback(cb):
         answer_cb(cb["id"])
 
 # ----------------------------------------------------------------------------- LISTENER LOOP (near real-time)
+# ============================================================================= SENSES (voice + vision)
+def tg_download(file_id):
+    r = requests.get(f"{TG_API}/getFile", params={"file_id": file_id}, timeout=30).json()
+    path = r["result"]["file_path"]
+    url = f"https://api.telegram.org/file/bot{TG_TOKEN}/{path}"
+    return requests.get(url, timeout=90).content, path
+
+def transcribe(data):
+    """Voice -> text via Groq Whisper (free)."""
+    key = _k("GROQ_API_KEY")
+    if not key:
+        return ""
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {key}"},
+            files={"file": ("audio.ogg", data, "audio/ogg")},
+            data={"model": "whisper-large-v3", "language": "en"}, timeout=120)
+        r.raise_for_status()
+        return r.json().get("text", "").strip()
+    except Exception:
+        return ""
+
+def vision(data, prompt):
+    """Image -> text. Gemini vision first, then free Llama-vision fallbacks."""
+    b64 = base64.b64encode(data).decode()
+    if _k("GEMINI_API_KEY"):
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={_k('GEMINI_API_KEY')}"
+            r = requests.post(url, timeout=120, json={"contents": [{"parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]})
+            if r.status_code == 200:
+                return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception:
+            pass
+    for prov, model in [("openrouter", "meta-llama/llama-3.2-11b-vision-instruct:free"),
+                        ("groq", "meta-llama/llama-4-scout-17b-16e-instruct")]:
+        if prov not in OAI or not _k(OAI[prov][1]):
+            continue
+        try:
+            r = requests.post(OAI[prov][0], timeout=120,
+                headers={"Authorization": f"Bearer {_k(OAI[prov][1])}", "Content-Type": "application/json"},
+                json={"model": model, "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}]}]})
+            if r.status_code == 200:
+                return r.json()["choices"][0]["message"]["content"].strip()
+        except Exception:
+            continue
+    return ""
+
+def handle_voice(file_id):
+    tg("sendChatAction", chat_id=TG_CHAT, action="typing")
+    try:
+        data, _ = tg_download(file_id)
+    except Exception:
+        return send("Couldn't fetch that voice note — try again.")
+    txt = transcribe(data)
+    if not txt:
+        return send("Couldn't transcribe that — the audio may be unclear. Try again or type it.")
+    send(f"🎙️ <i>{html.escape(txt)}</i>")
+    _dispatch_text(txt)
+
+def handle_photo(file_id, caption=""):
+    tg("sendChatAction", chat_id=TG_CHAT, action="typing")
+    send("🖼️ <i>reading the image…</i>")
+    try:
+        data, _ = tg_download(file_id)
+    except Exception:
+        return send("Couldn't fetch that image — try again.")
+    prompt = ("You're reading an image for Shivam, an internal auditor & trainer at Moustache hostels. "
+              "Extract the useful content concisely. If it's a checklist, audit sheet, whiteboard or notes, "
+              "list the items as short bullets. If it has action items, flag them clearly. "
+              + (f"His caption: {caption}. " if caption else ""))
+    out = vision(data, prompt)
+    if not out:
+        return send("Couldn't read that image — try a clearer, well-lit photo.")
+    send(out + "\n\n<i>Want me to add any of these as tasks? Just say which.</i>")
+
+def _dispatch_text(txt):
+    """Route a text message (from typing OR transcribed voice) to the right handler."""
+    if txt.startswith("/"):
+        return handle_command(txt, None)
+    st = config()
+    if st.get("STATE_awaiting_reflection") == "1":
+        job_collect()
+    elif st.get("STATE_report_mode"):
+        low = txt.strip().lower()
+        if low in ("send", "send it", "approve", "approve & send", "ok send", "yes send"):
+            send_report()
+        elif low in ("cancel", "stop", "discard", "no"):
+            _clear_report_state(); send("❌ Report cancelled — nothing sent.")
+        else:
+            revise_report(txt)
+    else:
+        orchestrate(txt)
+
 def job_listen(minutes=13):
     """Long-poll Telegram for commands/buttons for ~13 min, then exit.
     GitHub's scheduler launches a fresh run every 15 min, so the bot is effectively always on
@@ -892,27 +989,22 @@ def job_listen(minutes=13):
             offset = u["update_id"] + 1
             set_config("STATE_tg_offset", offset)
             try:
-                if "message" in u and u["message"].get("text"):
+                if "message" in u:
                     m = u["message"]
-                    if str(m["chat"]["id"]) != str(TG_CHAT):
+                    if str(m.get("chat", {}).get("id")) != str(TG_CHAT):
                         continue
-                    txt = m["text"]
-                    if txt.startswith("/"):
-                        handle_command(txt, m)
-                    else:
-                        st = config()
-                        if st.get("STATE_awaiting_reflection") == "1":
-                            job_collect()
-                        elif st.get("STATE_report_mode"):
-                            low = txt.strip().lower()
-                            if low in ("send", "send it", "approve", "approve & send", "ok send", "yes send"):
-                                send_report()
-                            elif low in ("cancel", "stop", "discard", "no"):
-                                _clear_report_state(); send("❌ Report cancelled — nothing sent.")
-                            else:
-                                revise_report(txt)
-                        else:
-                            orchestrate(txt)
+                    if m.get("text"):
+                        _dispatch_text(m["text"])
+                    elif m.get("voice") or m.get("audio"):
+                        handle_voice((m.get("voice") or m.get("audio"))["file_id"])
+                    elif m.get("photo"):
+                        handle_photo(m["photo"][-1]["file_id"], m.get("caption", ""))
+                    elif m.get("document"):
+                        d = m["document"]; mt = d.get("mime_type", "")
+                        if mt.startswith("image/"):
+                            handle_photo(d["file_id"], m.get("caption", ""))
+                        elif mt.startswith("audio/"):
+                            handle_voice(d["file_id"])
                 elif "callback_query" in u:
                     handle_callback(u["callback_query"])
             except Exception as e:
