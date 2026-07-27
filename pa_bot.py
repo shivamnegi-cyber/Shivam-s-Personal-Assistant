@@ -900,10 +900,11 @@ def transcribe(data):
         return ""
 
 VISION_MODELS = [
-    ("groq",       "meta-llama/llama-4-scout-17b-16e-instruct"),
-    ("groq",       "meta-llama/llama-4-maverick-17b-128e-instruct"),
-    ("openrouter", "google/gemini-2.0-flash-exp:free"),
-    ("openrouter", "qwen/qwen2.5-vl-72b-instruct:free"),
+    ("github",     "gpt-4o"),                                  # reliable, free (rate-limited)
+    ("together",   "meta-llama/Llama-Vision-Free"),            # Together free vision
+    ("mistral",    "pixtral-12b-2409"),                        # Mistral Pixtral (free tier)
+    ("nvidia",     "meta/llama-3.2-90b-vision-instruct"),      # NVIDIA NIM vision
+    ("nvidia",     "meta/llama-3.2-11b-vision-instruct"),
     ("openrouter", "meta-llama/llama-3.2-11b-vision-instruct:free"),
 ]
 
