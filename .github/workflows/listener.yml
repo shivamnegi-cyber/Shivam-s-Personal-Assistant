@@ -1,33 +1,31 @@
 name: PA Listener
 
-# TRUE 24/7 — GitHub's scheduler starts a fresh listener every 15 minutes.
-# Each run polls Telegram for ~13 min then exits; the next run is already scheduled,
-# so the bot can never "die" (no self-relaunch, no reliance on the blocked GITHUB_TOKEN).
-# Frequent cycles + cached deps keep the handover gap under ~1 min, so replies feel instant.
-# The Telegram offset is saved to the sheet, so no message is lost across the handover.
+# PINTEREST-STYLE 24/7 — one long continuous run (~5.7h) that relaunches ITSELF at the end
+# via a Personal Access Token (PAT_DISPATCH). No time-based cron, no gaps: the bot long-polls
+# Telegram the whole time (instant replies) and hands off instantly to the next run.
+# The relaunch uses a PAT (not the built-in GITHUB_TOKEN, which GitHub blocks from starting runs).
+# Requires a repo secret PAT_DISPATCH = a PAT with Actions: read/write on this repo.
 # Use a PUBLIC repo so Actions minutes are unlimited & free.
 
 on:
-  workflow_dispatch:          # lets you start it instantly the first time
-  schedule:
-    - cron: "*/15 * * * *"    # every 15 minutes, forever
+  workflow_dispatch:          # start it once; it keeps itself alive after that
 
 concurrency:
   group: pa-listener
-  cancel-in-progress: false   # never kill a run that's mid-poll; the next just waits its turn
+  cancel-in-progress: false   # the relaunch queues behind the finishing run — only one at a time
 
 jobs:
   listen:
     runs-on: ubuntu-latest
-    timeout-minutes: 14
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"        # cache deps so cold-start is ~10s, not ~40s
+          cache: "pip"
       - run: pip install -r requirements.txt
-      - name: Listen for commands & buttons (~13 min)
+      - name: Listen (continuous ~5.7h)
         env:
           TELEGRAM_TOKEN:    ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -45,3 +43,11 @@ jobs:
           SMTP_USER:         ${{ secrets.SMTP_USER }}
           SMTP_PASS:         ${{ secrets.SMTP_PASS }}
         run: python pa_bot.py listen
+      - name: Relaunch itself (keeps the chain unbroken)
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.PAT_DISPATCH }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/listener.yml/dispatches" \
+            -d "{\"ref\":\"${{ github.ref_name }}\"}"
