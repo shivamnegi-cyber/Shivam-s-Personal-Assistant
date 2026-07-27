@@ -9,10 +9,13 @@ name: PA Listener
 
 on:
   workflow_dispatch:          # start it once; it keeps itself alive after that
+  schedule:
+    - cron: "0 3 * * *"       # daily safety-net: heals the chain if the self-relaunch ever fails
 
 concurrency:
   group: pa-listener
-  cancel-in-progress: false   # the relaunch queues behind the finishing run — only one at a time
+  cancel-in-progress: false   # GitHub keeps only ONE pending run, so the daily trigger never
+                              # stacks up next to the self-relaunch — no duplicate listeners
 
 jobs:
   listen:
