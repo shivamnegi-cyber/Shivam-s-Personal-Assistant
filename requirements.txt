@@ -1,4 +1,0 @@
-gspread>=6.1.0
-google-auth>=2.30.0
-requests>=2.31.0
-ddgs>=6.0.0
